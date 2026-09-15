@@ -4,7 +4,7 @@ use crate::data::config::{CacheCleanStrategy, Config};
 use crate::tmplayer::app::state::{EQ_BANDS, EQ_FREQS_HZ, EqSettings};
 use crate::tmplayer::audio::pcm_tap::{PcmRing, PcmTap};
 use anyhow::{Context, Result};
-use rodio::cpal::Error;
+use rodio::cpal::{BufferSize, Error};
 use rodio::decoder::DecoderBuilder;
 use rodio::source::SeekError;
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source};
@@ -62,6 +62,8 @@ fn error_cb(error: MaybeError) -> impl Fn(Error) {
 
 fn build_player(error: MaybeError) -> Result<(Player, MixerDeviceSink)> {
     let builder = DeviceSinkBuilder::from_default_device()?;
+    #[cfg(target_os = "macos")]
+    let builder = builder.with_buffer_size(BufferSize::Fixed(1024));
     let sink = builder.with_error_callback(error_cb(error)).open_stream()?;
     let player = Player::connect_new(sink.mixer());
     Ok((player, sink))

@@ -165,8 +165,9 @@ jobs:
   aur:
     name: Sync AUR packages
     needs: [guard, build, publish]
-    # push：随发布自动同步；dispatch+sync_aur：手动补同步（此时 publish 被跳过）
-    if: ${{ !cancelled() && needs.publish.result != 'failed' && (github.event_name == 'push' || inputs.sync_aur == true) }}
+    # push：随发布自动同步；dispatch+sync_aur：手动补同步（此时 publish 被跳过）。
+    # Forks do not have the upstream AUR signing secret.
+    if: ${{ github.repository == 'professor-lee/CNMPlayer' && !cancelled() && needs.publish.result != 'failed' && (github.event_name == 'push' || inputs.sync_aur == true) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
