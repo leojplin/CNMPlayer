@@ -117,8 +117,31 @@ jobs:
       - name: Build
         run: cargo build --locked --release --target ${{ matrix.target }}
 
-      # 与既有发布约定一致：tarball 内平铺 cnmplayer + LICENSE（无顶层目录）
-      - name: Package
+      - name: Package macOS bundle
+        if: matrix.platform == 'macos'
+        run: |
+          mkdir -p pkg/CNMPlayer.app/Contents/MacOS
+          cp "target/${{ matrix.target }}/release/cnmplayer" pkg/CNMPlayer.app/Contents/MacOS/
+          cp packaging/macos/Info.plist pkg/CNMPlayer.app/Contents/
+          cat > pkg/cnmplayer <<'EOF'
+          #!/bin/sh
+          set -e
+          script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          for app in "$script_dir/CNMPlayer.app" "$HOME/Applications/CNMPlayer.app" "/Applications/CNMPlayer.app"; do
+            if [ -x "$app/Contents/MacOS/cnmplayer" ]; then
+              exec "$app/Contents/MacOS/cnmplayer" "$@"
+            fi
+          done
+          echo "CNMPlayer.app not found" >&2
+          exit 1
+          EOF
+          chmod 755 pkg/cnmplayer
+          cp LICENSE pkg/
+          (cd pkg && tar -cJf "../CNMPlayer_${TAG}_${{ matrix.platform }}_${ARCH}.tar.xz" cnmplayer CNMPlayer.app LICENSE)
+
+      # Linux tarballs keep the existing flat cnmplayer + LICENSE layout.
+      - name: Package Linux binary
+        if: matrix.platform == 'linux'
         run: |
           mkdir pkg
           cp "target/${{ matrix.target }}/release/cnmplayer" pkg/

@@ -2399,6 +2399,7 @@ impl App {
     }
 
     async fn apply_mpris_control_events(&mut self) {
+        self.mpris_bridge.pump();
         for event in self.mpris_bridge.drain_control_events() {
             match event {
                 MprisControlEvent::Play => self.mpris_play().await,

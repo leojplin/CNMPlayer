@@ -92,6 +92,8 @@ mod imp {
             let _ = self.tx.send_replace(Some(payload));
         }
 
+        pub fn pump(&self) {}
+
         pub fn drain_control_events(&self) -> Vec<MprisControlEvent> {
             let mut out = Vec::new();
             while let Ok(ev) = self.event_rx.try_recv() {
@@ -314,115 +316,89 @@ mod imp {
     use objc2_media_player::{
         MPMediaItemPropertyAlbumTitle, MPMediaItemPropertyArtist,
         MPMediaItemPropertyPlaybackDuration, MPMediaItemPropertyTitle,
-        MPNowPlayingInfoCenter, MPNowPlayingInfoPropertyElapsedPlaybackTime,
-        MPNowPlayingInfoPropertyPlaybackRate, MPNowPlayingPlaybackState, MPRemoteCommand,
+        MPNowPlayingInfoCenter, MPNowPlayingInfoMediaType, MPNowPlayingInfoPropertyElapsedPlaybackTime,
+        MPNowPlayingInfoPropertyMediaType, MPNowPlayingInfoPropertyPlaybackRate,
+        MPNowPlayingPlaybackState, MPRemoteCommand,
         MPRemoteCommandCenter, MPRemoteCommandEvent, MPRemoteCommandHandlerStatus,
     };
+    use std::ffi::c_void;
     use std::ptr::NonNull;
+    use std::sync::OnceLock;
     use std::sync::mpsc::{self as std_mpsc, Receiver, Sender};
-    use std::thread;
-    use std::time::Duration;
+
+    type SetCanBeNowPlayingApplication = unsafe extern "C" fn(u8) -> u8;
+    static SET_CAN_BE_NOW_PLAYING: OnceLock<Option<SetCanBeNowPlayingApplication>> = OnceLock::new();
 
     pub struct MprisBridge {
-        update_tx: Sender<MprisSyncPayload>,
+        // AppKit and MediaPlayer must be initialized and serviced on the process's
+        // main thread. The main TUI loop calls `pump` between its own events.
+        _application: Retained<AnyObject>,
+        info_center: Retained<MPNowPlayingInfoCenter>,
+        run_loop: Retained<NSRunLoop>,
+        _handler_targets: Vec<Retained<AnyObject>>,
         event_rx: Receiver<MprisControlEvent>,
     }
 
     impl MprisBridge {
         pub fn new(_cache_root: &Path, _cache_policy: &CacheConfig) -> Self {
-            let (update_tx, update_rx) = std_mpsc::channel();
+            let application = unsafe {
+                let class = AnyClass::get(c"NSApplication")
+                    .expect("NSApplication is unavailable on macOS");
+                let app: Retained<AnyObject> = msg_send![class, sharedApplication];
+                let _: () = msg_send![&app, finishLaunching];
+                // NSApplicationActivationPolicyAccessory: stay out of the Dock while
+                // remaining an eligible background media application.
+                let _: bool = msg_send![&app, setActivationPolicy: 1isize];
+                app
+            };
+
             let (event_tx, event_rx) = std_mpsc::channel();
+            let command_center = unsafe { MPRemoteCommandCenter::sharedCommandCenter() };
+            let play_command = unsafe { command_center.playCommand() };
+            let pause_command = unsafe { command_center.pauseCommand() };
+            let toggle_command = unsafe { command_center.togglePlayPauseCommand() };
+            let stop_command = unsafe { command_center.stopCommand() };
+            let next_command = unsafe { command_center.nextTrackCommand() };
+            let previous_command = unsafe { command_center.previousTrackCommand() };
+            let handler_targets = vec![
+                register_command(&play_command, &event_tx, MprisControlEvent::Play),
+                register_command(&pause_command, &event_tx, MprisControlEvent::Pause),
+                register_command(
+                    &toggle_command,
+                    &event_tx,
+                    MprisControlEvent::PlayPause,
+                ),
+                register_command(&stop_command, &event_tx, MprisControlEvent::Stop),
+                register_command(&next_command, &event_tx, MprisControlEvent::Next),
+                register_command(
+                    &previous_command,
+                    &event_tx,
+                    MprisControlEvent::Previous,
+                ),
+            ];
 
-            let _ = thread::Builder::new()
-                .name("cnmplayer-macos-media".to_string())
-                .spawn(move || run(update_rx, event_tx));
-
+            log::info!("macOS media control handlers registered on main thread");
             Self {
-                update_tx,
+                _application: application,
+                info_center: unsafe { MPNowPlayingInfoCenter::defaultCenter() },
+                run_loop: NSRunLoop::currentRunLoop(),
+                _handler_targets: handler_targets,
                 event_rx,
             }
         }
 
         pub fn update(&self, payload: MprisSyncPayload) {
-            let _ = self.update_tx.send(payload);
+            apply_snapshot(&self.info_center, payload);
+        }
+
+        pub fn pump(&self) {
+            let deadline = NSDate::dateWithTimeIntervalSinceNow(0.01);
+            self.run_loop.runUntilDate(&deadline);
         }
 
         pub fn drain_control_events(&self) -> Vec<MprisControlEvent> {
             self.event_rx.try_iter().collect()
         }
-    }
-
-    fn run(update_rx: Receiver<MprisSyncPayload>, event_tx: Sender<MprisControlEvent>) {
-        let Some(ns_application) = AnyClass::get(c"NSApplication") else {
-            log::warn!("macOS media controls unavailable: NSApplication not found");
-            return;
-        };
-
-        // MPRemoteCommandCenter ignores command-line clients without an NSApplication.
-        unsafe {
-            let app: Retained<AnyObject> = msg_send![ns_application, sharedApplication];
-            let _: bool = msg_send![&app, setActivationPolicy: 2isize];
-        }
-
-        let command_center = unsafe { MPRemoteCommandCenter::sharedCommandCenter() };
-        let play_command = unsafe { command_center.playCommand() };
-        let pause_command = unsafe { command_center.pauseCommand() };
-        let toggle_command = unsafe { command_center.togglePlayPauseCommand() };
-        let next_command = unsafe { command_center.nextTrackCommand() };
-        let previous_command = unsafe { command_center.previousTrackCommand() };
-        let mut handler_targets = Vec::new();
-        handler_targets.push(register_command(
-            &play_command,
-            &event_tx,
-            MprisControlEvent::Play,
-        ));
-        handler_targets.push(register_command(
-            &pause_command,
-            &event_tx,
-            MprisControlEvent::Pause,
-        ));
-        handler_targets.push(register_command(
-            &toggle_command,
-            &event_tx,
-            MprisControlEvent::PlayPause,
-        ));
-        handler_targets.push(register_command(
-            &next_command,
-            &event_tx,
-            MprisControlEvent::Next,
-        ));
-        handler_targets.push(register_command(
-            &previous_command,
-            &event_tx,
-            MprisControlEvent::Previous,
-        ));
-
-        log::info!("macOS media control handlers registered");
-        let info_center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
-        let run_loop = NSRunLoop::currentRunLoop();
-
-        loop {
-            let payload = match update_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(payload) => {
-                    let mut latest = payload;
-                    while let Ok(next) = update_rx.try_recv() {
-                        latest = next;
-                    }
-                    Some(latest)
-                }
-                Err(std_mpsc::RecvTimeoutError::Timeout) => None,
-                Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
-            };
-
-            if let Some(payload) = payload {
-                apply_snapshot(&info_center, payload);
-            }
-
-            let deadline = NSDate::dateWithTimeIntervalSinceNow(0.01);
-            run_loop.runUntilDate(&deadline);
-        }
-
-        drop(handler_targets);
     }
 
     fn register_command(
@@ -434,6 +410,7 @@ mod imp {
         let handler: RcBlock<
             dyn Fn(NonNull<MPRemoteCommandEvent>) -> MPRemoteCommandHandlerStatus,
         > = RcBlock::new(move |_| {
+            log::debug!("macOS media control event: {event:?}");
             let _ = tx.send(event);
             MPRemoteCommandHandlerStatus::Success
         });
@@ -444,7 +421,45 @@ mod imp {
         }
     }
 
+    fn set_now_playing_eligibility(enabled: bool) {
+        let setter = SET_CAN_BE_NOW_PLAYING.get_or_init(|| unsafe {
+            let framework = libc::dlopen(
+                c"/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote".as_ptr(),
+                libc::RTLD_LAZY,
+            );
+            if framework.is_null() {
+                return None;
+            }
+
+            let symbol = libc::dlsym(
+                framework,
+                c"MRMediaRemoteSetCanBeNowPlayingApplication".as_ptr(),
+            );
+            if symbol.is_null() {
+                return None;
+            }
+
+            Some(std::mem::transmute::<
+                *mut c_void,
+                SetCanBeNowPlayingApplication,
+            >(symbol))
+        });
+
+        if let Some(setter) = setter {
+            let accepted = unsafe { setter(enabled as u8) };
+            if accepted == 0 {
+                log::debug!("macOS MediaRemote rejected Now Playing eligibility");
+            }
+        }
+    }
+
     fn apply_snapshot(info_center: &MPNowPlayingInfoCenter, payload: MprisSyncPayload) {
+        if payload.playback == PlaybackRuntimeState::Stopped {
+            set_now_playing_eligibility(false);
+        } else if payload.track.is_some() {
+            set_now_playing_eligibility(true);
+        }
+
         let state = match payload.playback {
             PlaybackRuntimeState::Playing => MPNowPlayingPlaybackState::Playing,
             PlaybackRuntimeState::Paused => MPNowPlayingPlaybackState::Paused,
@@ -460,6 +475,8 @@ mod imp {
                 let album = NSString::from_str(&track.album);
                 let duration =
                     NSNumber::numberWithDouble(track.duration_ms.max(0) as f64 / 1000.0);
+                let media_type =
+                    NSNumber::numberWithUnsignedInteger(MPNowPlayingInfoMediaType::Audio.0);
                 let elapsed = NSNumber::numberWithDouble(payload.position.as_secs_f64());
                 let rate = NSNumber::numberWithDouble(if payload.playback
                     == PlaybackRuntimeState::Playing
@@ -473,6 +490,7 @@ mod imp {
                 dict.insert(MPMediaItemPropertyArtist, &*artist);
                 dict.insert(MPMediaItemPropertyAlbumTitle, &*album);
                 dict.insert(MPMediaItemPropertyPlaybackDuration, &*duration);
+                dict.insert(MPNowPlayingInfoPropertyMediaType, &*media_type);
                 dict.insert(MPNowPlayingInfoPropertyElapsedPlaybackTime, &*elapsed);
                 dict.insert(MPNowPlayingInfoPropertyPlaybackRate, &*rate);
                 info_center.setNowPlayingInfo(Some(&dict));
@@ -510,6 +528,8 @@ mod imp {
         }
 
         pub fn update(&self, _payload: MprisSyncPayload) {}
+
+        pub fn pump(&self) {}
 
         pub fn drain_control_events(&self) -> Vec<MprisControlEvent> {
             Vec::new()

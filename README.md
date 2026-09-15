@@ -42,7 +42,7 @@ When you switch into fullscreen playback, CNMPlayer hands control to the embedde
 - Theme switching, language switching, transparent background, hint toggles, and configurable keybinds
 - Bars / oscilloscope visualization; if `cava` is not installed, visualization is automatically disabled
 - Embedded TMPlayer fullscreen page; the main UI's `cava` is paused/resumed when entering/leaving fullscreen
-- Linux MPRIS sync
+- Linux MPRIS and macOS media-button control
 - Audio cache cleanup controls
 
 ## Notes
@@ -106,6 +106,8 @@ cargo run
 cargo build --release
 ./target/release/cnmplayer
 ```
+
+The macOS release archive includes `CNMPlayer.app` plus a `cnmplayer` launcher. Keep them together, or place the app in `~/Applications` or `/Applications`; macOS requires the app bundle for global media buttons.
 
 ### First Run and Asset Root
 
