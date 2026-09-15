@@ -1,6 +1,6 @@
 [package]
 name = "cnmplayer"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 
 [features]
@@ -40,6 +40,12 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 mpris-server = "0.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSDate", "NSDictionary", "NSRunLoop", "NSValue", "NSString"] }
+objc2-media-player = { version = "0.3", default-features = false, features = ["MPMediaItem", "MPNowPlayingInfoCenter", "MPRemoteCommand", "MPRemoteCommandCenter", "MPRemoteCommandEvent", "block2"] }
 
 [profile.release]
 codegen-units = 1

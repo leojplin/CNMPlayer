@@ -559,9 +559,10 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "cnmplayer"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
+ "block2",
  "compio",
  "crossterm",
  "cyper",
@@ -574,6 +575,9 @@ dependencies = [
  "log",
  "mpris-server",
  "ncm-api",
+ "objc2",
+ "objc2-foundation",
+ "objc2-media-player",
  "qrcode",
  "ratatui",
  "ratatui-image",
@@ -2647,6 +2651,18 @@ dependencies = [
  "libc",
  "objc2",
  "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-media-player"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85f2a98483f6e76313cb85a5a185eaa3cda86a177b13a8852d56cbd0085bf635"
+dependencies = [
+ "bitflags 2.13.1",
+ "block2",
+ "objc2",
+ "objc2-foundation",
 ]
 
 [[package]]

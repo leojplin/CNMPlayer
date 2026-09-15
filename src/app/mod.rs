@@ -21,7 +21,8 @@ use crate::tmplayer::playback::metadata::{parse_lrc, parse_plain_lyrics};
 use crate::ui::theme::Theme;
 use anyhow::{Result, anyhow};
 use crossterm::event::{
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MediaKeyCode, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use cyper::Client;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -2022,6 +2023,22 @@ impl App {
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
         {
             self.should_quit = true;
+            return;
+        }
+
+        if let KeyCode::Media(media) = key.code {
+            match media {
+                MediaKeyCode::Play => self.mpris_play().await,
+                MediaKeyCode::Pause => self.mpris_pause(),
+                MediaKeyCode::PlayPause => self.toggle_play_pause_hotkey().await,
+                MediaKeyCode::TrackNext => self.play_next_hotkey().await,
+                MediaKeyCode::TrackPrevious => self.play_previous_hotkey().await,
+                MediaKeyCode::Stop => {
+                    self.audio_player.stop();
+                    self.playback_state = PlaybackRuntimeState::Stopped;
+                }
+                _ => {}
+            }
             return;
         }
 

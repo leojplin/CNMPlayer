@@ -301,7 +301,204 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use super::{
+        CacheConfig, MprisControlEvent, MprisSyncPayload, Path, PlaybackRuntimeState,
+    };
+    use block2::RcBlock;
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::{NSDate, NSMutableDictionary, NSNumber, NSRunLoop, NSString};
+    use objc2_media_player::{
+        MPMediaItemPropertyAlbumTitle, MPMediaItemPropertyArtist,
+        MPMediaItemPropertyPlaybackDuration, MPMediaItemPropertyTitle,
+        MPNowPlayingInfoCenter, MPNowPlayingInfoPropertyElapsedPlaybackTime,
+        MPNowPlayingInfoPropertyPlaybackRate, MPNowPlayingPlaybackState, MPRemoteCommand,
+        MPRemoteCommandCenter, MPRemoteCommandEvent, MPRemoteCommandHandlerStatus,
+    };
+    use std::ptr::NonNull;
+    use std::sync::mpsc::{self as std_mpsc, Receiver, Sender};
+    use std::thread;
+    use std::time::Duration;
+
+    pub struct MprisBridge {
+        update_tx: Sender<MprisSyncPayload>,
+        event_rx: Receiver<MprisControlEvent>,
+    }
+
+    impl MprisBridge {
+        pub fn new(_cache_root: &Path, _cache_policy: &CacheConfig) -> Self {
+            let (update_tx, update_rx) = std_mpsc::channel();
+            let (event_tx, event_rx) = std_mpsc::channel();
+
+            let _ = thread::Builder::new()
+                .name("cnmplayer-macos-media".to_string())
+                .spawn(move || run(update_rx, event_tx));
+
+            Self {
+                update_tx,
+                event_rx,
+            }
+        }
+
+        pub fn update(&self, payload: MprisSyncPayload) {
+            let _ = self.update_tx.send(payload);
+        }
+
+        pub fn drain_control_events(&self) -> Vec<MprisControlEvent> {
+            self.event_rx.try_iter().collect()
+        }
+    }
+
+    fn run(update_rx: Receiver<MprisSyncPayload>, event_tx: Sender<MprisControlEvent>) {
+        let Some(ns_application) = AnyClass::get(c"NSApplication") else {
+            log::warn!("macOS media controls unavailable: NSApplication not found");
+            return;
+        };
+
+        // MPRemoteCommandCenter ignores command-line clients without an NSApplication.
+        unsafe {
+            let app: Retained<AnyObject> = msg_send![ns_application, sharedApplication];
+            let _: bool = msg_send![&app, setActivationPolicy: 2isize];
+        }
+
+        let command_center = unsafe { MPRemoteCommandCenter::sharedCommandCenter() };
+        let play_command = unsafe { command_center.playCommand() };
+        let pause_command = unsafe { command_center.pauseCommand() };
+        let toggle_command = unsafe { command_center.togglePlayPauseCommand() };
+        let next_command = unsafe { command_center.nextTrackCommand() };
+        let previous_command = unsafe { command_center.previousTrackCommand() };
+        let mut handler_targets = Vec::new();
+        handler_targets.push(register_command(
+            &play_command,
+            &event_tx,
+            MprisControlEvent::Play,
+        ));
+        handler_targets.push(register_command(
+            &pause_command,
+            &event_tx,
+            MprisControlEvent::Pause,
+        ));
+        handler_targets.push(register_command(
+            &toggle_command,
+            &event_tx,
+            MprisControlEvent::PlayPause,
+        ));
+        handler_targets.push(register_command(
+            &next_command,
+            &event_tx,
+            MprisControlEvent::Next,
+        ));
+        handler_targets.push(register_command(
+            &previous_command,
+            &event_tx,
+            MprisControlEvent::Previous,
+        ));
+
+        log::info!("macOS media control handlers registered");
+        let info_center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
+        let run_loop = NSRunLoop::currentRunLoop();
+
+        loop {
+            let payload = match update_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(payload) => {
+                    let mut latest = payload;
+                    while let Ok(next) = update_rx.try_recv() {
+                        latest = next;
+                    }
+                    Some(latest)
+                }
+                Err(std_mpsc::RecvTimeoutError::Timeout) => None,
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+
+            if let Some(payload) = payload {
+                apply_snapshot(&info_center, payload);
+            }
+
+            let deadline = NSDate::dateWithTimeIntervalSinceNow(0.01);
+            run_loop.runUntilDate(&deadline);
+        }
+
+        drop(handler_targets);
+    }
+
+    fn register_command(
+        command: &MPRemoteCommand,
+        event_tx: &Sender<MprisControlEvent>,
+        event: MprisControlEvent,
+    ) -> Retained<AnyObject> {
+        let tx = event_tx.clone();
+        let handler: RcBlock<
+            dyn Fn(NonNull<MPRemoteCommandEvent>) -> MPRemoteCommandHandlerStatus,
+        > = RcBlock::new(move |_| {
+            let _ = tx.send(event);
+            MPRemoteCommandHandlerStatus::Success
+        });
+
+        unsafe {
+            command.setEnabled(true);
+            command.addTargetWithHandler(&handler)
+        }
+    }
+
+    fn apply_snapshot(info_center: &MPNowPlayingInfoCenter, payload: MprisSyncPayload) {
+        let state = match payload.playback {
+            PlaybackRuntimeState::Playing => MPNowPlayingPlaybackState::Playing,
+            PlaybackRuntimeState::Paused => MPNowPlayingPlaybackState::Paused,
+            PlaybackRuntimeState::Stopped => MPNowPlayingPlaybackState::Stopped,
+        };
+
+        unsafe {
+            if let Some(track) = payload.track {
+                let dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
+                    NSMutableDictionary::new();
+                let title = NSString::from_str(&track.title);
+                let artist = NSString::from_str(&track.artist);
+                let album = NSString::from_str(&track.album);
+                let duration =
+                    NSNumber::numberWithDouble(track.duration_ms.max(0) as f64 / 1000.0);
+                let elapsed = NSNumber::numberWithDouble(payload.position.as_secs_f64());
+                let rate = NSNumber::numberWithDouble(if payload.playback
+                    == PlaybackRuntimeState::Playing
+                {
+                    1.0
+                } else {
+                    0.0
+                });
+
+                dict.insert(MPMediaItemPropertyTitle, &*title);
+                dict.insert(MPMediaItemPropertyArtist, &*artist);
+                dict.insert(MPMediaItemPropertyAlbumTitle, &*album);
+                dict.insert(MPMediaItemPropertyPlaybackDuration, &*duration);
+                dict.insert(MPNowPlayingInfoPropertyElapsedPlaybackTime, &*elapsed);
+                dict.insert(MPNowPlayingInfoPropertyPlaybackRate, &*rate);
+                info_center.setNowPlayingInfo(Some(&dict));
+            } else if payload.playback == PlaybackRuntimeState::Stopped {
+                info_center.setNowPlayingInfo(None);
+            } else if let Some(existing) = info_center.nowPlayingInfo() {
+                let dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
+                    NSMutableDictionary::dictionaryWithDictionary(&existing);
+                let elapsed = NSNumber::numberWithDouble(payload.position.as_secs_f64());
+                let rate = NSNumber::numberWithDouble(if payload.playback
+                    == PlaybackRuntimeState::Playing
+                {
+                    1.0
+                } else {
+                    0.0
+                });
+                dict.insert(MPNowPlayingInfoPropertyElapsedPlaybackTime, &*elapsed);
+                dict.insert(MPNowPlayingInfoPropertyPlaybackRate, &*rate);
+                info_center.setNowPlayingInfo(Some(&dict));
+            }
+            info_center.setPlaybackState(state);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod imp {
     use super::{CacheConfig, MprisControlEvent, MprisSyncPayload, Path};
 

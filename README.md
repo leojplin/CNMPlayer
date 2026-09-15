@@ -62,7 +62,7 @@ When you switch into fullscreen playback, CNMPlayer hands control to the embedde
 - Image rendering: ratatui-image + chafa
 - Visualization: external `cava`
 - Fullscreen playback integration: TMPlayer
-- Linux media control: MPRIS
+- Linux MPRIS and macOS media-button control
 
 ## Development and Run
 
