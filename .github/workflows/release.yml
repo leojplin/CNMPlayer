@@ -70,10 +70,20 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            platform: linux
             arch: amd64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            platform: linux
             arch: aarch64
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            platform: macos
+            arch: arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos
+            arch: x86_64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -84,12 +94,17 @@ jobs:
         with:
           ref: ${{ needs.guard.outputs.tag }}
 
-      - name: Install system dependencies
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config \
             libasound2-dev libchafa-dev libpipewire-0.3-dev libssl-dev libglib2.0-dev libclang-dev
+
+      - name: Install macOS system dependencies
+        if: matrix.platform == 'macos'
+        run: brew install pkg-config chafa
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -108,12 +123,12 @@ jobs:
           mkdir pkg
           cp "target/${{ matrix.target }}/release/cnmplayer" pkg/
           cp LICENSE pkg/
-          (cd pkg && tar -cJf "../CNMPlayer_${TAG}_linux_${ARCH}.tar.xz" cnmplayer LICENSE)
+          (cd pkg && tar -cJf "../CNMPlayer_${TAG}_${{ matrix.platform }}_${ARCH}.tar.xz" cnmplayer LICENSE)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rel-${{ matrix.arch }}
-          path: CNMPlayer_${{ needs.guard.outputs.tag }}_linux_${{ matrix.arch }}.tar.xz
+          name: rel-${{ matrix.platform }}-${{ matrix.arch }}
+          path: CNMPlayer_${{ needs.guard.outputs.tag }}_${{ matrix.platform }}_${{ matrix.arch }}.tar.xz
           if-no-files-found: error
 
   publish:
